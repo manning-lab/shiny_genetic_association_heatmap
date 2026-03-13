@@ -41,6 +41,9 @@ ui <- fluidPage(
       #heatmap_container { min-height: 400px; }
       .chip { display:inline-block; background:#e9ecef; border-radius:12px;
               padding:2px 8px; font-size:12px; margin:2px; }
+      textarea.bulk-input { font-family: monospace; font-size: 12px;
+                            resize: vertical; }
+      .bulk-note { color:#666; font-size:11px; margin-top:2px; }
     "))
   ),
 
@@ -125,6 +128,29 @@ ui <- fluidPage(
       actionButton("btn_add_manual", "Add to Heatmap",
                    class = "btn-warning btn-sm",
                    icon  = icon("plus"),
+                   width = "100%"),
+
+      hr(),
+
+      # ---- Bulk Variant Input ----
+      div(class = "section-title", icon("list"), " Bulk Variant Input"),
+      p(class = "bulk-note",
+        "Paste one rsID per line to add multiple variants at once."),
+      tags$textarea(
+        id          = "bulk_variants",
+        class       = "form-control bulk-input",
+        rows        = "6",
+        placeholder = "rs7903146\nrs1801282\nrs10811661\n..."
+      ),
+      br(),
+      checkboxInput(
+        "bulk_heatmap_studies_only",
+        label = "Limit to studies already in heatmap",
+        value = FALSE
+      ),
+      actionButton("btn_add_bulk", "Add All Variants",
+                   class = "btn-primary btn-sm",
+                   icon  = icon("layer-group"),
                    width = "100%"),
       br(),
       uiOutput("add_status_ui"),
@@ -223,7 +249,7 @@ server <- function(input, output, session) {
   add_msg         <- reactiveVal(NULL)
 
   # Track which source belongs to each study already in the heatmap
-  study_sources <- reactiveVal(named_chr <- setNames(character(0), character(0)))
+  study_sources <- reactiveVal(setNames(character(0), character(0)))
 
   # ---- Helpers ---------------------------------------------------------------
 
@@ -450,6 +476,93 @@ server <- function(input, output, session) {
     add_msg(list(type = "ok", msg = msg))
   })
 
+  # ---- Add: bulk pasted variant list ----------------------------------------
+
+  observeEvent(input$btn_add_bulk, {
+    raw_text <- input$bulk_variants
+    if (is.null(raw_text) || !nzchar(trimws(raw_text))) {
+      add_msg(list(type = "err", msg = "Please paste at least one variant ID."))
+      return()
+    }
+
+    # Parse: handle \r\n (Windows), \n (Unix), \r (old Mac); strip comments
+    vids <- readLines(textConnection(raw_text), warn = FALSE)
+    vids <- trimws(vids)
+    vids <- vids[nzchar(vids) & !grepl("^#", vids)]
+    vids <- unique(vids)
+
+    if (length(vids) == 0) {
+      add_msg(list(type = "err", msg = "No valid variant IDs found in the input."))
+      return()
+    }
+
+    heatmap_only    <- isTRUE(input$bulk_heatmap_studies_only)
+    heatmap_studies <- unique(beta_data()$study_id)
+    src             <- input$data_source
+
+    if (heatmap_only && length(heatmap_studies) == 0) {
+      add_msg(list(
+        type = "err",
+        msg  = paste0("No studies in the heatmap yet. ",
+                      "Uncheck 'Limit to studies already in heatmap' to add ",
+                      "all found associations.")
+      ))
+      return()
+    }
+
+    add_msg(list(type = "info",
+                 msg  = paste("Processing", length(vids), "variant(s)…")))
+
+    n_added    <- 0L
+    not_found  <- character(0)
+
+    withProgress(message = "Adding variants…", value = 0, {
+      for (i in seq_along(vids)) {
+        vid <- vids[[i]]
+        setProgress(
+          value  = i / length(vids),
+          detail = sprintf("(%d/%d) %s", i, length(vids), vid)
+        )
+
+        res <- search_variant(vid, src)
+
+        if (is.null(res) || nrow(res) == 0) {
+          not_found <- c(not_found, vid)
+          next
+        }
+
+        if (heatmap_only) {
+          res <- res[res$study_id %in% heatmap_studies, , drop = FALSE]
+          if (nrow(res) == 0) {
+            not_found <- c(not_found, vid)
+            next
+          }
+        }
+
+        n_new   <- add_rows(res[, c("variant_id", "study_id", "beta", "source"),
+                                drop = FALSE])
+        n_added <- n_added + (if (is.null(n_new)) 0L else n_new)
+      }
+
+      # Fill any gaps in the complete (variant × study) matrix
+      fill_matrix()
+    })
+
+    # Build human-readable summary
+    n_found <- length(vids) - length(not_found)
+    parts   <- paste(n_found, "of", length(vids), "variant(s) found")
+    if (n_added > 0)
+      parts <- paste(parts, "—", n_added, "association(s) added")
+    if (length(not_found) > 0)
+      parts <- paste(parts,
+                     "— not found:", paste(not_found, collapse = ", "))
+
+    add_msg(list(
+      type = if (n_added > 0) "ok" else "err",
+      msg  = parts
+    ))
+  })
+
   output$add_status_ui <- renderUI({
     m <- add_msg()
     if (is.null(m)) return(NULL)
@@ -619,6 +732,14 @@ server <- function(input, output, session) {
         tags$li("Click a cell in the heatmap to see details, or brush to select a region."),
         tags$li("Download the heatmap as a PNG with the ", tags$b("Download PNG"), " button.")
       ),
+      h4("Bulk Variant Input"),
+      p("Paste a list of rsIDs — one per line — into the ",
+        tags$b("Bulk Variant Input"), " box and click ",
+        tags$b("Add All Variants"), ". Lines starting with ", code("#"),
+        " are treated as comments and ignored. Duplicate IDs are silently deduplicated."),
+      p("Enable ", tags$b("Limit to studies already in heatmap"),
+        " to restrict results to studies that are already represented,",
+        " e.g. to expand the heatmap by adding more variants across the same study set."),
       h4("Manual Entry"),
       p("You can also type a Variant ID and Study ID directly (e.g. ",
         code("rs7903146"), " and ", code("GCST001234"),
