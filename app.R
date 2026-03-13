@@ -181,13 +181,14 @@ ui <- fluidPage(
           conditionalPanel(
             condition = "output.has_heatmap_data",
             id = "heatmap_container",
-            InteractiveComplexHeatmapOutput(
-              "ht_main",
-              height           = 520,
-              width            = "100%",
-              response         = c("click", "brush"),
-              brush_opt        = list(stroke = "#1A73E8", opacity = 0.6),
-              output_ui        = htmlOutput("ht_info")
+            div(style = "width: 100%;",
+              InteractiveComplexHeatmapOutput(
+                "ht_main",
+                height           = 520,
+                response         = c("click", "brush"),
+                brush_opt        = list(stroke = "#1A73E8", opacity = 0.6),
+                output_ui        = htmlOutput("ht_info")
+              )
             ),
             br(),
             downloadButton("btn_download", "Download PNG",
