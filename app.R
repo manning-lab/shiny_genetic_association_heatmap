@@ -216,6 +216,49 @@ ui <- fluidPage(
           DT::dataTableOutput("data_table")
         ),
 
+        # Query diagnostics tab
+        tabPanel(
+          title = tagList(icon("stethoscope"), " Query Diagnostics"),
+          value = "tab_diag",
+          br(),
+          fluidRow(
+            column(12,
+              h4("API Query Diagnostics"),
+              p(style = "color:#555; font-size:13px;",
+                "Test how a variant ID is resolved across both data sources.",
+                "This is useful when a search returns no results or an error —",
+                "the table below shows each query strategy attempted, the URL",
+                "constructed, the HTTP status code, and the number of",
+                "associations found."
+              )
+            )
+          ),
+          fluidRow(
+            column(6,
+              textInput("diag_variant_id",
+                        label       = "Variant ID",
+                        value       = "",
+                        placeholder = "e.g. rs979012"),
+              actionButton("btn_run_diag", "Run Diagnostics",
+                           class = "btn-primary btn-sm",
+                           icon  = icon("stethoscope"),
+                           width = "100%")
+            ),
+            column(6,
+              uiOutput("diag_status_ui")
+            )
+          ),
+          br(),
+          conditionalPanel(
+            condition = "output.has_diag_results",
+            div(class = "section-title", "Query Strategy Results"),
+            DT::dataTableOutput("diag_results_table"),
+            br(),
+            div(class = "section-title", "Summary"),
+            uiOutput("diag_summary_ui")
+          )
+        ),
+
         # About tab
         tabPanel(
           title = tagList(icon("circle-info"), " Help"),
@@ -720,6 +763,88 @@ server <- function(input, output, session) {
     }
   )
 
+  # ---- Query Diagnostics tab ------------------------------------------------
+
+  diag_results <- reactiveVal(NULL)
+  diag_msg     <- reactiveVal(NULL)
+
+  observeEvent(input$btn_run_diag, {
+    vid <- trimws(input$diag_variant_id)
+    req(nzchar(vid))
+
+    diag_msg(list(type = "info", msg = paste("Running diagnostics for", vid, "…")))
+    diag_results(NULL)
+
+    withProgress(message = paste("Testing queries for", vid, "…"), {
+      res <- query_diagnostics(vid)
+    })
+
+    diag_results(res)
+
+    n_ok <- sum(!is.na(res$n_results) & res$n_results > 0, na.rm = TRUE)
+    if (n_ok > 0) {
+      diag_msg(list(type = "ok",
+                    msg  = paste0(n_ok, " of ", nrow(res),
+                                  " query strategy/strategies returned results.")))
+    } else {
+      diag_msg(list(type = "err",
+                    msg  = paste0("No query strategies returned results for '",
+                                  vid, "'.")))
+    }
+  })
+
+  output$diag_status_ui <- renderUI({
+    m <- diag_msg()
+    if (is.null(m)) return(NULL)
+    css <- paste0("status-box status-", m$type)
+    div(class = css, m$msg)
+  })
+
+  output$has_diag_results <- reactive({
+    res <- diag_results()
+    !is.null(res) && nrow(res) > 0
+  })
+  outputOptions(output, "has_diag_results", suspendWhenHidden = FALSE)
+
+  output$diag_results_table <- DT::renderDataTable({
+    res <- diag_results()
+    req(res)
+    DT::datatable(
+      res,
+      rownames = FALSE,
+      options  = list(pageLength = 10, scrollX = TRUE, dom = "tip"),
+      caption  = paste("Query strategies tested for", trimws(input$diag_variant_id))
+    )
+  })
+
+  output$diag_summary_ui <- renderUI({
+    res <- diag_results()
+    req(res)
+
+    rows <- lapply(seq_len(nrow(res)), function(i) {
+      row   <- res[i, ]
+      ok    <- !is.na(row$n_results) && row$n_results > 0
+      icon_ <- if (ok) icon("circle-check", style = "color:green;")
+               else    icon("circle-xmark", style = "color:#c00;")
+      n_str <- if (is.na(row$n_results)) "—"
+               else                      as.character(row$n_results)
+      err_str <- if (!is.na(row$error)) paste0(" (", row$error, ")")
+                 else ""
+      tags$li(
+        icon_,
+        tags$b(row$strategy), " — ",
+        "HTTP ", if (is.na(row$http_status)) "?" else row$http_status, ", ",
+        n_str, " result(s)", err_str,
+        br(),
+        tags$small(
+          style = "color:#666; word-break:break-all;",
+          if (is.na(row$url)) "" else row$url
+        )
+      )
+    })
+    tags$ul(rows)
+  })
+
   # ---- Help tab -------------------------------------------------------------
 
   output$help_ui <- renderUI({
@@ -747,6 +872,14 @@ server <- function(input, output, session) {
         ") and click ", tags$b("Add to Heatmap"), "."),
       h4("Colour Scale"),
       p("Blue = negative beta, white = zero, orange = positive beta. Grey cells have no available beta value."),
+      h4("Query Diagnostics"),
+      p("If a search for a variant returns an error or no results, use the ",
+        tags$b("Query Diagnostics"), " tab to inspect each query strategy in",
+        " detail. It shows the URL constructed, the HTTP status code returned,",
+        " and how many associations were found. For HuGeAMP variants that",
+        " return HTTP 400 (because the variant is not indexed by rsID), the",
+        " app automatically falls back to a position-based query using",
+        " chromosomal coordinates from Ensembl."),
       h4("Data Sources"),
       tags$ul(
         tags$li(a("GWAS Catalog REST API v2",
