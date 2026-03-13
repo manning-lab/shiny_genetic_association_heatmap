@@ -184,7 +184,7 @@ ui <- fluidPage(
             div(style = "width: 100%;",
               InteractiveComplexHeatmapOutput(
                 "ht_main",
-                height           = 520,
+                height1          = 520,
                 response         = c("click", "brush"),
                 brush_opt        = list(stroke = "#1A73E8", opacity = 0.6),
                 output_ui        = htmlOutput("ht_info")
